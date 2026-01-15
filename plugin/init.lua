@@ -14,7 +14,7 @@ local function setup_package_path()
     if not plugin_list or #plugin_list == 0 then
         return nil
     end
-    
+
     -- Find our plugin directory by looking for agent-deck in the path
     local plugin_dir = nil
     for _, plugin in ipairs(plugin_list) do
@@ -23,22 +23,22 @@ local function setup_package_path()
             break
         end
     end
-    
+
     if not plugin_dir then
         -- Fallback: use the first plugin's directory (useful during local dev)
         plugin_dir = plugin_list[1].plugin_dir
     end
-    
+
     if plugin_dir then
         -- Add plugin directory to package.path for requiring sub-modules
         local plugin_path = plugin_dir .. separator .. '?.lua'
         local components_path = plugin_dir .. separator .. 'components' .. separator .. '?.lua'
-        
+
         if not package.path:find(plugin_path, 1, true) then
             package.path = package.path .. ';' .. plugin_path .. ';' .. components_path
         end
     end
-    
+
     return plugin_dir
 end
 
@@ -54,7 +54,9 @@ local function get_module(name)
         if success then
             modules[name] = mod
         else
-            wezterm.log_error('[agent-deck] Failed to load module ' .. name .. ': ' .. tostring(mod))
+            wezterm.log_error(
+                '[agent-deck] Failed to load module ' .. name .. ': ' .. tostring(mod)
+            )
             return nil
         end
     end
@@ -64,8 +66,8 @@ end
 -- Internal state
 local state = {
     initialized = false,
-    agent_states = {},  -- pane_id -> { agent_type, status, last_update, cooldown_start }
-    last_notification = {},  -- pane_id -> timestamp
+    agent_states = {}, -- pane_id -> { agent_type, status, last_update, cooldown_start }
+    last_notification = {}, -- pane_id -> timestamp
 }
 
 --[[ ============================================
@@ -76,15 +78,49 @@ local default_config = {
     update_interval = 5000,
     cooldown_ms = 2000,
     max_lines = 100,
-    
+    enabled_agents = nil,
+
     agents = {
-        opencode = { patterns = { 'opencode' } },
-        claude = { patterns = { 'claude', 'claude%-code' } },
+        opencode = {
+            patterns = { 'opencode' },
+            executable_patterns = {
+                'opencode%-darwin',
+                'opencode%-linux',
+                'opencode%-win',
+                '%.opencode/bin/opencode',
+                '/opencode%-ai/',
+                '/opencode$',
+            },
+            argv_patterns = {
+                'bunx%s+opencode',
+                'npx%s+opencode',
+                '/opencode$',
+            },
+            title_patterns = { 'opencode' },
+        },
+        claude = {
+            patterns = { 'claude', 'claude%-code' },
+            executable_patterns = {
+                '@anthropic%-ai/claude%-code',
+                '/claude%-code/',
+                '/claude$',
+                '^claude%s*$',
+            },
+            argv_patterns = {
+                '@anthropic%-ai/claude%-code',
+                'claude%-code',
+                '^claude%s*$',
+            },
+            title_patterns = {
+                'claude code',
+                'claude',
+            },
+        },
         gemini = { patterns = { 'gemini' } },
         codex = { patterns = { 'codex' } },
         aider = { patterns = { 'aider' } },
     },
-    
+
     tab_title = {
         enabled = true,
         position = 'left',
@@ -93,7 +129,7 @@ local default_config = {
             { type = 'separator', text = ' ' },
         },
     },
-    
+
     right_status = {
         enabled = true,
         components = {
@@ -102,14 +138,14 @@ local default_config = {
             { type = 'badge', filter = 'working', label = 'working' },
         },
     },
-    
+
     colors = {
         working = 'green',
         waiting = 'yellow',
         idle = 'blue',
         inactive = 'gray',
     },
-    
+
     icons = {
         style = 'unicode',
         unicode = {
@@ -119,10 +155,10 @@ local default_config = {
             inactive = '◌',
         },
         nerd = {
-            working = '',  -- nf-fa-circle
-            waiting = '',  -- nf-fa-adjust
-            idle = '',  -- nf-fa-circle_o
-            inactive = '',  -- nf-cod-circle_outline
+            working = '', -- nf-fa-circle
+            waiting = '', -- nf-fa-adjust
+            idle = '', -- nf-fa-circle_o
+            inactive = '', -- nf-cod-circle_outline
         },
         emoji = {
             working = '🟢',
@@ -131,7 +167,7 @@ local default_config = {
             inactive = '⚪',
         },
     },
-    
+
     notifications = {
         enabled = true,
         on_waiting = true,
@@ -171,7 +207,9 @@ local function deep_merge(t1, t2)
 end
 
 local function deep_copy(t)
-    if type(t) ~= 'table' then return t end
+    if type(t) ~= 'table' then
+        return t
+    end
     local result = {}
     for k, v in pairs(t) do
         result[k] = deep_copy(v)
@@ -214,101 +252,156 @@ local detection_cache = {}
 local CACHE_TTL_MS = 5000
 
 local function get_executable_name(path)
-    if not path then return '' end
+    if not path then
+        return ''
+    end
     local name = path:match('[/\\]([^/\\]+)$') or path
     return name:gsub('%.exe$', '')
 end
 
 local function matches_any_pattern(str, patterns)
-    if not str or not patterns then return false end
+    if not str or not patterns then
+        return false
+    end
     local str_lower = str:lower()
     for _, pattern in ipairs(patterns) do
-        if str_lower:find(pattern:lower()) then
+        local success, result = pcall(function()
+            return str_lower:find(pattern:lower())
+        end)
+        if success and result then
+            return true
+        end
+        if not success and str_lower:find(pattern:lower(), 1, true) then
             return true
         end
     end
     return false
 end
 
+local function is_agent_enabled(agent_name, config)
+    if not config.enabled_agents then
+        return true
+    end
+    for _, enabled in ipairs(config.enabled_agents) do
+        if enabled == agent_name then
+            return true
+        end
+    end
+    return false
+end
+
+local function get_patterns_for_phase(agent_config, pattern_type, agent_name)
+    local specific_key = pattern_type .. '_patterns'
+    if agent_config[specific_key] and #agent_config[specific_key] > 0 then
+        return agent_config[specific_key]
+    end
+    if agent_config.patterns and #agent_config.patterns > 0 then
+        return agent_config.patterns
+    end
+    return { agent_name }
+end
+
+local function detect_from_process_info(executable, argv_str, config)
+    local exe_name = get_executable_name(executable)
+    for agent_name, agent_config in pairs(config.agents) do
+        if is_agent_enabled(agent_name, config) then
+            local exe_patterns = get_patterns_for_phase(agent_config, 'executable', agent_name)
+            if
+                matches_any_pattern(executable, exe_patterns)
+                or matches_any_pattern(exe_name, exe_patterns)
+            then
+                return agent_name
+            end
+            local argv_patterns = get_patterns_for_phase(agent_config, 'argv', agent_name)
+            if matches_any_pattern(argv_str, argv_patterns) then
+                return agent_name
+            end
+        end
+    end
+    return nil
+end
+
+local function detect_from_title(pane_title, config)
+    if not pane_title or pane_title == '' then
+        return nil
+    end
+    for agent_name, agent_config in pairs(config.agents) do
+        if is_agent_enabled(agent_name, config) then
+            local title_patterns = get_patterns_for_phase(agent_config, 'title', agent_name)
+            if matches_any_pattern(pane_title, title_patterns) then
+                return agent_name
+            end
+        end
+    end
+    return nil
+end
+
 local function detect_agent(pane, config)
     local pane_id = pane:pane_id()
     local now = os.time() * 1000
-    
-    -- Check cache
+
     local cached = detection_cache[pane_id]
     if cached and (now - cached.timestamp) < CACHE_TTL_MS then
         return cached.agent_type
     end
-    
+
     local agent_type = nil
-    
-    -- Try process info
+
     local success, process_info = pcall(function()
         return pane:get_foreground_process_info()
     end)
-    
+
     if success and process_info then
-        local exe_name = get_executable_name(process_info.executable or '')
+        local executable = process_info.executable or ''
+        local name = process_info.name or ''
         local argv_str = table.concat(process_info.argv or {}, ' ')
-        
-        for agent_name, agent_config in pairs(config.agents) do
-            local patterns = agent_config.patterns or { agent_name }
-            if matches_any_pattern(exe_name, patterns) or matches_any_pattern(argv_str, patterns) then
-                agent_type = agent_name
-                break
-            end
+        agent_type = detect_from_process_info(executable, argv_str, config)
+        if not agent_type and name ~= '' then
+            agent_type = detect_from_process_info(name, argv_str, config)
         end
-        
-        -- Check children
+
         if not agent_type and process_info.children then
-            for _, child in ipairs(process_info.children) do
-                local child_exe = get_executable_name(child.executable or '')
+            for _, child in pairs(process_info.children) do
+                local child_exe = child.executable or ''
+                local child_name = child.name or ''
                 local child_argv = table.concat(child.argv or {}, ' ')
-                for agent_name, agent_config in pairs(config.agents) do
-                    local patterns = agent_config.patterns or { agent_name }
-                    if matches_any_pattern(child_exe, patterns) or matches_any_pattern(child_argv, patterns) then
-                        agent_type = agent_name
-                        break
-                    end
+                agent_type = detect_from_process_info(child_exe, child_argv, config)
+                if not agent_type and child_name ~= '' then
+                    agent_type = detect_from_process_info(child_name, child_argv, config)
                 end
-                if agent_type then break end
+                if agent_type then
+                    break
+                end
             end
         end
     end
-    
-    -- Fallback to process name
+
     if not agent_type then
         local name_success, process_name = pcall(function()
             return pane:get_foreground_process_name()
         end)
         if name_success and process_name then
-            local exe_name = get_executable_name(process_name)
-            for agent_name, agent_config in pairs(config.agents) do
-                local patterns = agent_config.patterns or { agent_name }
-                if matches_any_pattern(exe_name, patterns) then
-                    agent_type = agent_name
-                    break
-                end
-            end
+            agent_type = detect_from_process_info(process_name, '', config)
         end
     end
-    
-    -- Fallback to pane title (catches agents that set terminal title like "Claude Code v2.1.6")
+
     if not agent_type then
         local title_success, pane_title = pcall(function()
             return pane:get_title()
         end)
-        if title_success and pane_title then
-            for agent_name, agent_config in pairs(config.agents) do
-                local patterns = agent_config.patterns or { agent_name }
-                if matches_any_pattern(pane_title, patterns) then
-                    agent_type = agent_name
-                    break
-                end
+        if title_success then
+            agent_type = detect_from_title(pane_title, config)
+        end
+        if not agent_type then
+            local prop_success, prop_title = pcall(function()
+                return pane.title
+            end)
+            if prop_success and prop_title then
+                agent_type = detect_from_title(prop_title, config)
             end
         end
     end
-    
+
     detection_cache[pane_id] = { agent_type = agent_type, timestamp = now }
     return agent_type
 end
@@ -318,35 +411,69 @@ end
      ============================================ ]]
 
 local default_patterns = {
+    -- Working patterns are AUTHORITATIVE: if a working indicator is present,
+    -- the agent is busy regardless of any stale prompts in scrollback.
+    -- Only include reliable UI indicators, not generic words.
     working = {
         'esc to interrupt',
         'esc interrupt',
         'ctrl%+c to interrupt',
-        'thinking', 'pondering', 'processing', 'analyzing',
-        'generating', 'writing', 'reading', 'searching',
-        'delegating work', 'planning next steps', 'gathering context',
-        'searching the codebase', 'searching the web', 'making edits',
-        'running commands', 'gathering thoughts', 'considering next steps',
+        'thinking%.%.%.',
+        'pondering%.%.%.',
+        'generating%.%.%.',
+        'delegating work',
+        'planning next steps',
+        'gathering context',
+        'searching the codebase',
+        'searching the web',
+        'making edits',
+        'running commands',
+        'gathering thoughts',
+        'considering next steps',
+        'building tool call',
     },
+    -- Waiting patterns — only checked AFTER working patterns.
+    -- A busy indicator always wins over a stale permission prompt.
     waiting = {
-        'esc to cancel', 'yes, allow once', 'yes, allow always',
-        'allow once', 'allow always', 'deny',
-        'no, and tell', 'do you trust', 'run this command',
-        'execute this', 'continue%?', 'proceed%?',
-        '%(y/n%)', '%(Y/n%)', '%[y/n%]', '%[Y/n%]',
-        '%(y/N%)', '%(Y/N%)', '%[y/N%]', '%[Y/N%]',
-        'approve this plan', 'do you want to proceed',
+        'esc to cancel',
+        'yes, allow once',
+        'yes, allow always',
+        'allow once',
+        'allow always',
+        'deny',
+        'no, and tell',
+        'do you trust',
+        'run this command',
+        'execute this',
+        'continue%?',
+        'proceed%?',
+        '%(y/n%)',
+        '%(Y/n%)',
+        '%[y/n%]',
+        '%[Y/n%]',
+        '%(y/N%)',
+        '%(Y/N%)',
+        '%[y/N%]',
+        '%[Y/N%]',
+        'approve this plan',
+        'do you want to proceed',
         'press enter to continue',
+        -- Menu selection indicators
+        '' .. ' Yes',
+        '' .. ' No', -- Nerd font arrow
         -- Plan mode ask tool patterns (OpenCode v1.1.18+)
-        'enter confirm',           -- Confirmation hint in ask dialog footer
-        'esc dismiss',             -- Dismiss hint in ask dialog footer
-        'type your own answer',    -- Custom input option in ask dialogs
+        'enter confirm', -- Confirmation hint in ask dialog footer
+        'esc dismiss', -- Dismiss hint in ask dialog footer
+        'type your own answer', -- Custom input option in ask dialogs
     },
-    idle = { '^>%s*$', '^> $', '^>$' },
+    -- Claude Code uses ❯ (U+276F), not ASCII >
+    idle = { '^>%s*$', '^> $', '^>$', '^❯%s*$', '^❯ $', '^❯$' },
 }
 
 local function strip_ansi(text)
-    if not text then return '' end
+    if not text then
+        return ''
+    end
     local result = text
     result = result:gsub('\27%[%d*;?%d*;?%d*[A-Za-z]', '')
     result = result:gsub('\27%].-\007', '')
@@ -361,20 +488,28 @@ local function strip_ansi(text)
 end
 
 local function matches_any_status(text, patterns)
-    if not text or not patterns then return false end
+    if not text or not patterns then
+        return false
+    end
     local text_lower = text:lower()
     for _, pattern in ipairs(patterns) do
         local success, result = pcall(function()
             return text_lower:find(pattern:lower())
         end)
-        if success and result then return true end
-        if not success and text_lower:find(pattern:lower(), 1, true) then return true end
+        if success and result then
+            return true
+        end
+        if not success and text_lower:find(pattern:lower(), 1, true) then
+            return true
+        end
     end
     return false
 end
 
 local function get_last_lines(text, n)
-    if not text then return '' end
+    if not text then
+        return ''
+    end
     local lines = {}
     for line in text:gmatch('[^\n]+') do
         table.insert(lines, line)
@@ -388,7 +523,9 @@ local function get_last_lines(text, n)
 end
 
 local function detect_status(pane, agent_type, config)
-    if not agent_type then return 'inactive' end
+    if not agent_type then
+        return 'inactive'
+    end
 
     local success, text = pcall(function()
         return pane:get_lines_as_text(config.max_lines or 100)
@@ -410,15 +547,29 @@ local function detect_status(pane, agent_type, config)
         }
     end
 
-    -- Check in priority order: idle > working > waiting
+    -- Detection priority: idle > working > waiting
+    --
+    -- Key insight (from asheshgoplani/agent-deck): busy indicators are
+    -- AUTHORITATIVE. If a spinner or "esc to interrupt" is present, the
+    -- agent is actively working regardless of any stale permission prompts
+    -- left in scrollback. This is the primary defense against false
+    -- "waiting" from old, already-answered prompts.
+
+    -- 1. Idle check: scan last 5 lines for the > prompt.
+    --    When the agent shows ">", it's definitively idle — the TUI
+    --    replaces it with spinner/progress when working starts.
     local last_lines = get_last_lines(clean_text, 5)
-    local last_line_empty = false
 
     for line in last_lines:gmatch('[^\n]+') do
         local trimmed = line:match('^%s*(.-)%s*$') or ''
 
-        -- Check for ">" prompt (Claude/OpenCode prompt starts with >)
-        if trimmed == '>' or trimmed:match('^>%s') then
+        -- Check for ">" or "❯" prompt (Claude Code uses ❯ U+276F, not ASCII >)
+        if
+            trimmed == '>'
+            or trimmed == '❯'
+            or trimmed:match('^>%s')
+            or trimmed:match('^❯%s')
+        then
             return 'idle'
         end
 
@@ -428,31 +579,60 @@ local function detect_status(pane, agent_type, config)
         end
     end
 
-    -- Check if last line is empty/whitespace (OpenCode idle state)
-    local lines = {}
-    for line in clean_text:gmatch('[^\n]+') do
-        table.insert(lines, line)
-    end
-    if #lines > 0 then
-        local last = lines[#lines]:match('^%s*(.-)%s*$') or ''
-        last_line_empty = (last == '')
-    end
-
-    -- Check working before waiting
+    -- 2. Working check (last 10 lines) — working indicators are
+    --    authoritative and override any waiting patterns. If both a
+    --    stale prompt and a fresh spinner are visible, the agent is working.
     local very_recent = get_last_lines(clean_text, 10)
     if matches_any_status(very_recent, patterns.working) then
         return 'working'
     end
 
-    -- If last line is empty and no working indicators, likely idle
-    if last_line_empty then
-        return 'idle'
+    -- 3. Waiting check — only reached when no working indicator was found.
+    --    Scan last 30 lines for permission prompts, but require the prompt
+    --    to be "fresh" (near the bottom). After a prompt is answered, tool
+    --    output pushes it away from the bottom. We find the last waiting
+    --    match position and check that no more than 6 content lines follow
+    --    it — if there are more, the prompt was already answered (stale).
+    local recent_text = get_last_lines(clean_text, 30)
+    local recent_lower = recent_text:lower()
+    local last_match_end = nil
+    for _, pattern in ipairs(patterns.waiting) do
+        local s, e = pcall(function()
+            -- find the LAST occurrence by searching repeatedly
+            local pos, end_pos = 0, 0
+            local search_start = 1
+            while true do
+                local s2, e2 = recent_lower:find(pattern:lower(), search_start)
+                if not s2 then
+                    break
+                end
+                pos, end_pos = s2, e2
+                search_start = e2 + 1
+            end
+            if pos > 0 then
+                return end_pos
+            end
+            return nil
+        end)
+        if s and e then
+            if not last_match_end or e > last_match_end then
+                last_match_end = e
+            end
+        end
     end
-
-    -- Check waiting only in very recent lines (reduce false positives from scrollback)
-    local recent_text = get_last_lines(clean_text, 10)
-    if matches_any_status(recent_text, patterns.waiting) then
-        return 'waiting'
+    if last_match_end then
+        -- Count non-blank lines after the last waiting match
+        local after_text = recent_text:sub(last_match_end + 1)
+        local lines_after = 0
+        for line in after_text:gmatch('[^\n]+') do
+            if line:match('%S') then
+                lines_after = lines_after + 1
+            end
+        end
+        -- If 6 or fewer content lines follow, the prompt is still active
+        if lines_after <= 6 then
+            return 'waiting'
+        end
     end
 
     -- Default to idle
@@ -472,7 +652,9 @@ local function get_default_title(tab)
             title = process_name:match('[/\\]([^/\\]+)$') or process_name
         end
     end
-    if title == '' then title = 'Terminal' end
+    if title == '' then
+        title = 'Terminal'
+    end
     return title
 end
 
@@ -489,17 +671,23 @@ end
 local function render_badge(counts, filter, label)
     local count = 0
     if filter == 'all' then
-        for _, c in pairs(counts) do count = count + c end
+        for _, c in pairs(counts) do
+            count = count + c
+        end
     else
         count = counts[filter] or 0
     end
-    
-    if count == 0 then return {} end
-    
+
+    if count == 0 then
+        return {}
+    end
+
     local color = get_status_color(filter ~= 'all' and filter or 'working')
     local text = tostring(count)
-    if label then text = text .. ' ' .. label end
-    
+    if label then
+        text = text .. ' ' .. label
+    end
+
     return {
         { Foreground = { Color = color } },
         { Text = text },
@@ -513,7 +701,7 @@ end
 
 local function render_component(comp, context)
     local comp_type = comp.type
-    
+
     if comp_type == 'icon' then
         return render_icon(context.status or 'inactive')
     elseif comp_type == 'separator' then
@@ -541,7 +729,7 @@ local function render_component(comp, context)
             { Attribute = { Intensity = 'Normal' } },
         }
     end
-    
+
     return {}
 end
 
@@ -558,19 +746,19 @@ end
 
 local function render_tab_title(agent_state, tab, tab_config)
     local default_title = get_default_title(tab)
-    
+
     if not agent_state then
         return { { Text = ' ' .. default_title .. ' ' } }
     end
-    
+
     local context = {
         status = agent_state.status or 'inactive',
         agent_type = agent_state.agent_type,
     }
-    
+
     local component_items = render_components(tab_config.components or {}, context)
     local result = { { Text = ' ' } }
-    
+
     if tab_config.position == 'left' then
         for _, item in ipairs(component_items) do
             table.insert(result, item)
@@ -582,7 +770,7 @@ local function render_tab_title(agent_state, tab, tab_config)
             table.insert(result, item)
         end
     end
-    
+
     table.insert(result, { Text = ' ' })
     return result
 end
@@ -590,7 +778,7 @@ end
 local function render_tab_title_multi(all_pane_states, tab, tab_config)
     local default_title = get_default_title(tab)
     local result = { { Text = ' ' } }
-    
+
     if tab_config.position == 'left' then
         for i, pane_data in ipairs(all_pane_states) do
             local status = pane_data.state.status or 'inactive'
@@ -618,7 +806,7 @@ local function render_tab_title_multi(all_pane_states, tab, tab_config)
         end
         table.insert(result, { Attribute = { Intensity = 'Normal' } })
     end
-    
+
     table.insert(result, { Text = ' ' })
     return result
 end
@@ -626,12 +814,16 @@ end
 local function render_right_status(counts)
     local cfg = get_config()
     local total = 0
-    for _, count in pairs(counts) do total = total + count end
-    if total == 0 then return {} end
-    
+    for _, count in pairs(counts) do
+        total = total + count
+    end
+    if total == 0 then
+        return {}
+    end
+
     local context = { counts = counts }
     local result = render_components(cfg.right_status.components or {}, context)
-    
+
     -- Filter empty items and trailing separators
     local filtered = {}
     local last_was_text = false
@@ -647,7 +839,7 @@ local function render_right_status(counts)
             end
         end
     end
-    
+
     while #filtered > 0 do
         local last = filtered[#filtered]
         if last.Text and last.Text:match('^[%s|%-]+$') then
@@ -656,12 +848,12 @@ local function render_right_status(counts)
             break
         end
     end
-    
+
     if #filtered > 0 then
         table.insert(filtered, 1, { Text = ' ' })
         table.insert(filtered, { Text = ' ' })
     end
-    
+
     return filtered
 end
 
@@ -672,7 +864,9 @@ end
 local MIN_NOTIFICATION_GAP_MS = 10000
 
 local function shell_escape(str)
-    if not str then return '' end
+    if not str then
+        return ''
+    end
     return "'" .. str:gsub("'", "'\\''") .. "'"
 end
 
@@ -680,30 +874,35 @@ local function send_terminal_notifier(subtitle, message, config)
     local tn_config = config.notifications.terminal_notifier or {}
     local binary = tn_config.path or 'terminal-notifier'
     local title = tn_config.title or 'WezTerm Agent Deck'
-    
+
     local cmd = binary
-        .. ' -title ' .. shell_escape(title)
-        .. ' -subtitle ' .. shell_escape(subtitle)
-        .. ' -message ' .. shell_escape(message)
-    
+        .. ' -title '
+        .. shell_escape(title)
+        .. ' -subtitle '
+        .. shell_escape(subtitle)
+        .. ' -message '
+        .. shell_escape(message)
+
     if tn_config.sound then
         cmd = cmd .. ' -sound ' .. shell_escape(tn_config.sound)
     end
-    
+
     if tn_config.group then
         cmd = cmd .. ' -group ' .. shell_escape(tn_config.group)
     end
-    
+
     if tn_config.activate then
         cmd = cmd .. ' -sender com.github.wez.wezterm'
     end
-    
+
     local handle = io.popen(cmd .. ' 2>&1', 'r')
     if handle then
         local result = handle:read('*a')
         local success, _, code = handle:close()
         if not success or code ~= 0 then
-            wezterm.log_warn('[agent-deck] terminal-notifier failed: ' .. (result or 'unknown error'))
+            wezterm.log_warn(
+                '[agent-deck] terminal-notifier failed: ' .. (result or 'unknown error')
+            )
             return false
         end
         return true
@@ -715,7 +914,7 @@ local function notify_waiting(pane, agent_type, config)
     if not config.notifications.enabled or not config.notifications.on_waiting then
         return
     end
-    
+
     local agent_names = {
         opencode = 'OpenCode',
         claude = 'Claude',
@@ -728,32 +927,34 @@ local function notify_waiting(pane, agent_type, config)
     local message = 'Needs your input'
     local timeout_ms = config.notifications.timeout_ms or 4000
     local backend = config.notifications.backend or 'native'
-    
+
     if backend == 'terminal-notifier' then
         if send_terminal_notifier(subtitle, message, config) then
             wezterm.log_info('[agent-deck] terminal-notifier sent: ' .. subtitle)
         end
         return
     end
-    
+
     local tab = pane:tab()
     if not tab then
         wezterm.log_warn('[agent-deck] notification failed: pane has no tab')
         return
     end
-    
+
     local mux_window = tab:window()
     if not mux_window then
         wezterm.log_warn('[agent-deck] notification failed: tab has no window')
         return
     end
-    
+
     local gui_window = mux_window:gui_window()
     if not gui_window then
-        wezterm.log_warn('[agent-deck] notification failed: mux_window has no gui_window (headless?)')
+        wezterm.log_warn(
+            '[agent-deck] notification failed: mux_window has no gui_window (headless?)'
+        )
         return
     end
-    
+
     gui_window:toast_notification(subtitle, message, nil, timeout_ms)
     wezterm.log_info('[agent-deck] notification sent: ' .. subtitle)
 end
@@ -770,9 +971,9 @@ local function update_agent_state(pane, config)
     local pane_id = pane:pane_id()
     local current_state = state.agent_states[pane_id]
     local now = os.time() * 1000
-    
+
     local agent_type = detect_agent(pane, config)
-    
+
     if not agent_type then
         if current_state then
             local old_status = current_state.status
@@ -784,9 +985,9 @@ local function update_agent_state(pane, config)
         end
         return nil
     end
-    
+
     local new_status = detect_status(pane, agent_type, config)
-    
+
     if not current_state then
         current_state = {
             agent_type = agent_type,
@@ -797,16 +998,16 @@ local function update_agent_state(pane, config)
         state.agent_states[pane_id] = current_state
         wezterm.emit('agent_deck.agent_detected', nil, pane, agent_type)
         wezterm.emit('agent_deck.status_changed', nil, pane, 'inactive', new_status, agent_type)
-        
+
         if new_status == 'waiting' then
             notify_waiting(pane, agent_type, config)
         end
-        
+
         return current_state
     end
-    
+
     local old_status = current_state.status
-    
+
     -- Cooldown logic
     if old_status == 'working' and new_status == 'idle' then
         if not current_state.cooldown_start then
@@ -821,24 +1022,30 @@ local function update_agent_state(pane, config)
     elseif new_status == 'working' then
         current_state.cooldown_start = nil
     end
-    
+
     if old_status ~= new_status then
         current_state.status = new_status
         current_state.last_update = now
         wezterm.emit('agent_deck.status_changed', nil, pane, old_status, new_status, agent_type)
-        
+
         if new_status == 'waiting' then
             local last_notify = state.last_notification[pane_id] or 0
             if (now - last_notify) > MIN_NOTIFICATION_GAP_MS then
                 notify_waiting(pane, agent_type, config)
                 state.last_notification[pane_id] = now
-                wezterm.emit('agent_deck.attention_needed', nil, pane, agent_type, 'waiting_for_input')
+                wezterm.emit(
+                    'agent_deck.attention_needed',
+                    nil,
+                    pane,
+                    agent_type,
+                    'waiting_for_input'
+                )
             end
         end
     else
         current_state.last_update = now
     end
-    
+
     current_state.agent_type = agent_type
     return current_state
 end
@@ -867,34 +1074,36 @@ function M.setup(opts)
 end
 
 function M.apply_to_config(config, opts)
-    if opts then set_config(opts) end
-    
+    if opts then
+        set_config(opts)
+    end
+
     local plugin_config = get_config()
     config.status_update_interval = plugin_config.update_interval
-    
+
     if plugin_config.tab_title.enabled then
         wezterm.on('format-tab-title', function(tab, tabs, panes, wezterm_config, hover, max_width)
             local active_pane_id = tab.active_pane.pane_id
             local all_pane_states = {}
-            
+
             for _, pane_info in ipairs(tab.panes or {}) do
                 local p_state = get_agent_state(pane_info.pane_id)
                 if p_state then
                     table.insert(all_pane_states, {
                         state = p_state,
-                        is_active = (pane_info.pane_id == active_pane_id)
+                        is_active = (pane_info.pane_id == active_pane_id),
                     })
                 end
             end
-            
+
             if #all_pane_states == 0 then
                 return nil
             end
-            
+
             return render_tab_title_multi(all_pane_states, tab, plugin_config.tab_title)
         end)
     end
-    
+
     -- Status bar (right status)
     if plugin_config.right_status.enabled then
         wezterm.on('update-status', function(window, pane)
@@ -903,10 +1112,10 @@ function M.apply_to_config(config, opts)
                     update_agent_state(p, plugin_config)
                 end
             end
-            
+
             local counts = count_agents_by_status()
             local right_status = render_right_status(counts)
-            
+
             if right_status and #right_status > 0 then
                 window:set_right_status(wezterm.format(right_status))
             end
@@ -920,7 +1129,7 @@ function M.apply_to_config(config, opts)
             end
         end)
     end
-    
+
     state.initialized = true
     wezterm.log_info('[agent-deck] Plugin applied to config')
 end

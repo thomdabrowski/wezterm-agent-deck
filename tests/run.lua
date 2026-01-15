@@ -39,7 +39,9 @@ runner:test('detector.detect_agent matches executable, argv, and children', func
     local detector = require('detector')
 
     local pane = {
-        pane_id = function() return 1 end,
+        pane_id = function()
+            return 1
+        end,
         get_foreground_process_info = function()
             return {
                 executable = '/usr/bin/node',
@@ -76,11 +78,176 @@ runner:test('detector.detect_agent matches executable, argv, and children', func
     t.eq(detector.detect_agent(pane, cfg), 'claude')
 end)
 
+runner:test('detector.detect_agent uses executable_patterns for specific matching', function()
+    local detector = require('detector')
+
+    local pane = {
+        pane_id = function()
+            return 3
+        end,
+        get_foreground_process_info = function()
+            return {
+                executable = '/Users/test/.bun/install/global/node_modules/opencode-darwin-arm64/bin/opencode',
+                argv = { 'opencode' },
+                children = {},
+            }
+        end,
+        get_foreground_process_name = function()
+            return 'opencode'
+        end,
+    }
+
+    local cfg = {
+        agents = {
+            opencode = {
+                patterns = { 'opencode' },
+                executable_patterns = { 'opencode%-darwin', 'opencode%-linux' },
+            },
+        },
+    }
+
+    t.eq(detector.detect_agent(pane, cfg), 'opencode')
+end)
+
+runner:test('detector.detect_agent respects enabled_agents whitelist', function()
+    local detector = require('detector')
+
+    local pane = {
+        pane_id = function()
+            return 4
+        end,
+        get_foreground_process_info = function()
+            return {
+                executable = '/usr/bin/gemini',
+                argv = { 'gemini' },
+                children = {},
+            }
+        end,
+        get_foreground_process_name = function()
+            return 'gemini'
+        end,
+    }
+
+    local cfg = {
+        enabled_agents = { 'opencode', 'claude' },
+        agents = {
+            opencode = { patterns = { 'opencode' } },
+            claude = { patterns = { 'claude' } },
+            gemini = { patterns = { 'gemini' } },
+        },
+    }
+
+    t.eq(detector.detect_agent(pane, cfg), nil)
+
+    detector.clear_cache(4)
+    cfg.enabled_agents = nil
+    t.eq(detector.detect_agent(pane, cfg), 'gemini')
+end)
+
+runner:test('detector.detect_agent uses title_patterns for fallback', function()
+    local detector = require('detector')
+
+    local pane = {
+        pane_id = function()
+            return 5
+        end,
+        get_foreground_process_info = function()
+            return {
+                executable = '/bin/zsh',
+                argv = { 'zsh' },
+                children = {},
+            }
+        end,
+        get_foreground_process_name = function()
+            return '/bin/zsh'
+        end,
+        get_title = function()
+            return 'Claude Code v2.1.6'
+        end,
+    }
+
+    local cfg = {
+        agents = {
+            claude = {
+                patterns = { 'claude' },
+                title_patterns = { 'claude%s+code%s+v' },
+            },
+        },
+    }
+
+    t.eq(detector.detect_agent(pane, cfg), 'claude')
+end)
+
+runner:test('detector.detect_agent matches bare claude executable with trailing spaces', function()
+    local detector = require('detector')
+
+    local pane = {
+        pane_id = function()
+            return 6
+        end,
+        get_foreground_process_info = function()
+            return {
+                executable = 'claude  ',
+                argv = { 'claude' },
+                children = {},
+            }
+        end,
+        get_foreground_process_name = function()
+            return 'claude  '
+        end,
+    }
+
+    local cfg = {
+        agents = {
+            claude = {
+                patterns = { 'claude' },
+                executable_patterns = { '^claude%s*$' },
+            },
+        },
+    }
+
+    t.eq(detector.detect_agent(pane, cfg), 'claude')
+end)
+
+runner:test('detector.detect_agent uses process name field when executable is node', function()
+    local detector = require('detector')
+
+    local pane = {
+        pane_id = function()
+            return 7
+        end,
+        get_foreground_process_info = function()
+            return {
+                executable = '/usr/local/bin/node',
+                name = 'claude',
+                argv = { 'node', '/path/to/cli.js' },
+                children = {},
+            }
+        end,
+        get_foreground_process_name = function()
+            return '/usr/local/bin/node'
+        end,
+    }
+
+    local cfg = {
+        agents = {
+            claude = {
+                patterns = { 'claude' },
+                executable_patterns = { '^claude%s*$' },
+            },
+        },
+    }
+
+    t.eq(detector.detect_agent(pane, cfg), 'claude')
+end)
+
 runner:test('detector.detect_agent falls back to pane title for Claude Code', function()
     local detector = require('detector')
 
     local pane = {
-        pane_id = function() return 2 end,
+        pane_id = function()
+            return 2
+        end,
         get_foreground_process_info = function()
             return {
                 executable = '/bin/zsh',
@@ -270,6 +437,337 @@ runner:test('components render placeholders and badge counts', function()
         end
     end
     t.eq(badge_text, '1 waiting')
+end)
+
+runner:test('status.detect_status ignores stale waiting prompt after tool output', function()
+    local status = require('status')
+
+    -- Simulate: Claude asked a permission question, user approved, and now
+    -- there's tool output below the answered prompt. The old "yes, allow once"
+    -- text is still in scrollback but should be treated as stale.
+    local pane = {
+        get_lines_as_text = function()
+            return table.concat({
+                'I need to run this command:',
+                '  rm -rf /tmp/test',
+                'Do you trust this command?',
+                '  Yes, allow once',
+                '  Yes, allow always',
+                '  No, and tell Claude why',
+                '',
+                '  ── Tool Result ──',
+                '  Command executed successfully.',
+                '  Removed 3 files.',
+                '',
+                '  Now let me check the results...',
+                '  Reading file /tmp/output.txt',
+                '  The output looks correct.',
+                '  Processing complete.',
+                '  All tests passed.',
+                '  Summary: 10 files updated.',
+                '  Done.',
+            }, '\n')
+        end,
+        get_logical_lines_as_text = function()
+            return ''
+        end,
+    }
+
+    local cfg = { max_lines = 100, agents = { claude = {} } }
+
+    -- Should NOT be 'waiting' because the prompt was already answered
+    -- (many content lines after the last waiting pattern)
+    t.eq(status.detect_status(pane, 'claude', cfg), 'idle')
+end)
+
+runner:test('status.detect_status detects active waiting prompt near bottom', function()
+    local status = require('status')
+
+    -- Simulate: Claude just asked a permission question, it's at the bottom
+    -- of the screen with no tool output after it yet.
+    local pane = {
+        get_lines_as_text = function()
+            return table.concat({
+                'Some previous output from earlier tasks...',
+                'More output lines...',
+                'Even more output...',
+                '',
+                'I need to edit this file:',
+                '  src/main.ts',
+                '',
+                'Do you trust this command?',
+                '  Yes, allow once',
+                '  Yes, allow always',
+                '  No, and tell Claude why',
+            }, '\n')
+        end,
+        get_logical_lines_as_text = function()
+            return ''
+        end,
+    }
+
+    local cfg = { max_lines = 100, agents = { claude = {} } }
+
+    -- Should be 'waiting' because the prompt is active (near bottom)
+    t.eq(status.detect_status(pane, 'claude', cfg), 'waiting')
+end)
+
+runner:test('status.detect_status detects OpenCode ask dialog as waiting', function()
+    local status = require('status')
+
+    -- Simulate OpenCode's bubbletea TUI ask dialog with borders
+    local pane = {
+        get_lines_as_text = function()
+            return table.concat({
+                '  opencode',
+                '  Model: claude-sonnet-4-20250514',
+                '',
+                '  Working on your request...',
+                '',
+                '  Filter Type  Standalone  Confirm',
+                '  ┌─────────────────────────────────────┐',
+                '  │ The agent wants to run:              │',
+                '  │   npm install express                │',
+                '  │                                      │',
+                '  │ 1. Yes, allow once                   │',
+                '  │ 2. Yes, allow always                 │',
+                '  │ 3. No                                │',
+                '  │ 4. Type your own answer              │',
+                '  └─────────────────────────────────────┘',
+                '  ⇥ tab  ↕ select  enter confirm  esc dismiss',
+            }, '\n')
+        end,
+        get_logical_lines_as_text = function()
+            return ''
+        end,
+    }
+
+    local cfg = { max_lines = 100, agents = { opencode = {} } }
+
+    t.eq(status.detect_status(pane, 'opencode', cfg), 'waiting')
+end)
+
+runner:test('status.detect_status returns working when agent is processing', function()
+    local status = require('status')
+
+    -- No idle prompt, no waiting prompt, but working indicator present
+    local pane = {
+        get_lines_as_text = function()
+            return table.concat({
+                'some previous output',
+                'more output',
+                '',
+                'Thinking...',
+                '',
+            }, '\n')
+        end,
+        get_logical_lines_as_text = function()
+            return ''
+        end,
+    }
+
+    local cfg = { max_lines = 100, agents = { claude = {} } }
+
+    t.eq(status.detect_status(pane, 'claude', cfg), 'working')
+end)
+
+runner:test('status.detect_status returns working for esc to interrupt', function()
+    local status = require('status')
+
+    local pane = {
+        get_lines_as_text = function()
+            return table.concat({
+                'some output',
+                '',
+                '  Esc to interrupt',
+                '',
+            }, '\n')
+        end,
+        get_logical_lines_as_text = function()
+            return ''
+        end,
+    }
+
+    local cfg = { max_lines = 100, agents = { claude = {} } }
+
+    t.eq(status.detect_status(pane, 'claude', cfg), 'working')
+end)
+
+runner:test('status.detect_status working with stale waiting in scrollback', function()
+    local status = require('status')
+
+    -- Agent answered a permission prompt, now actively working on something else.
+    -- The old "yes, allow once" is stale (many lines after it), and
+    -- "esc to interrupt" is near the bottom showing active work.
+    local pane = {
+        get_lines_as_text = function()
+            return table.concat({
+                '  Do you trust this command?',
+                '  Yes, allow once',
+                '  Yes, allow always',
+                '  No, and tell Claude why',
+                '',
+                '  ── Tool Result ──',
+                '  Command executed successfully.',
+                '',
+                '  Now working on the next step...',
+                '  Reading file src/main.ts',
+                '  Analyzing the codebase structure',
+                '  Found 5 relevant files',
+                '  Checking dependencies',
+                '  Preparing changes',
+                '',
+                '  Esc to interrupt',
+                '',
+            }, '\n')
+        end,
+        get_logical_lines_as_text = function()
+            return ''
+        end,
+    }
+
+    local cfg = { max_lines = 100, agents = { claude = {} } }
+
+    -- Should be 'working' — stale waiting prompt is ignored, esc to interrupt is active
+    t.eq(status.detect_status(pane, 'claude', cfg), 'working')
+end)
+
+runner:test('status.detect_status does not false-positive on output words', function()
+    local status = require('status')
+
+    -- Agent is idle, output contains words like "reading" and "processing"
+    -- that used to be working patterns but are actually just prose in output
+    local pane = {
+        get_lines_as_text = function()
+            return table.concat({
+                '  I finished processing the files.',
+                '  After reading the configuration,',
+                '  I made the following changes:',
+                '  - Updated the writing module',
+                '  - Fixed the searching logic',
+                '  Done.',
+            }, '\n')
+        end,
+        get_logical_lines_as_text = function()
+            return ''
+        end,
+    }
+
+    local cfg = { max_lines = 100, agents = { claude = {} } }
+
+    -- Should NOT be 'working' — these are output words, not status indicators
+    t.eq(status.detect_status(pane, 'claude', cfg), 'idle')
+end)
+
+runner:test('status.detect_status idle beats stale waiting in scrollback', function()
+    local status = require('status')
+
+    -- Agent finished a task, idle prompt visible, but old waiting text
+    -- from a PREVIOUS interaction is still in scrollback
+    local pane = {
+        get_lines_as_text = function()
+            return table.concat({
+                '  Do you trust this command?',
+                '  Yes, allow once',
+                '  Yes, allow always',
+                '  No, and tell Claude why',
+                '',
+                '  ── Tool Result ──',
+                '  Command executed successfully.',
+                '',
+                '  I have completed the task.',
+                '  Worked for 2m 15s',
+                '',
+                '> ',
+            }, '\n')
+        end,
+        get_logical_lines_as_text = function()
+            return ''
+        end,
+    }
+
+    local cfg = { max_lines = 100, agents = { claude = {} } }
+
+    -- Idle prompt at bottom should win over stale waiting text above
+    t.eq(status.detect_status(pane, 'claude', cfg), 'idle')
+end)
+
+runner:test('status.detect_status working beats fresh waiting (busy-is-authoritative)', function()
+    local status = require('status')
+
+    -- Critical scenario: agent just answered a permission prompt and is now
+    -- actively working. The old prompt text is still VERY close to the bottom
+    -- (within the 6-line freshness threshold), but a working indicator is
+    -- also present. Working must win because busy indicators are authoritative.
+    local pane = {
+        get_lines_as_text = function()
+            return table.concat({
+                '  Do you trust this command?',
+                '  Yes, allow once',
+                '  Yes, allow always',
+                '  No, and tell Claude why',
+                '',
+                '  Esc to interrupt',
+            }, '\n')
+        end,
+        get_logical_lines_as_text = function()
+            return ''
+        end,
+    }
+
+    local cfg = { max_lines = 100, agents = { claude = {} } }
+
+    -- With the old priority (waiting > working), this would incorrectly
+    -- return 'waiting' because the prompt is within 6 lines of the bottom.
+    -- With busy-is-authoritative, working wins.
+    t.eq(status.detect_status(pane, 'claude', cfg), 'working')
+end)
+
+runner:test('status.detect_status ctrl+c to interrupt means working', function()
+    local status = require('status')
+
+    -- Claude Code 2024+ uses "ctrl+c to interrupt" instead of "esc to interrupt"
+    local pane = {
+        get_lines_as_text = function()
+            return table.concat({
+                'some previous output',
+                '',
+                '  Ctrl+C to interrupt',
+                '',
+            }, '\n')
+        end,
+        get_logical_lines_as_text = function()
+            return ''
+        end,
+    }
+
+    local cfg = { max_lines = 100, agents = { claude = {} } }
+
+    t.eq(status.detect_status(pane, 'claude', cfg), 'working')
+end)
+
+runner:test('status.detect_status opencode generating means working', function()
+    local status = require('status')
+
+    -- OpenCode shows "Generating..." while producing output
+    local pane = {
+        get_lines_as_text = function()
+            return table.concat({
+                '  opencode',
+                '  Model: claude-sonnet-4-20250514',
+                '',
+                '  Generating...',
+                '',
+            }, '\n')
+        end,
+        get_logical_lines_as_text = function()
+            return ''
+        end,
+    }
+
+    local cfg = { max_lines = 100, agents = { opencode = {} } }
+
+    t.eq(status.detect_status(pane, 'opencode', cfg), 'working')
 end)
 
 runner:run()

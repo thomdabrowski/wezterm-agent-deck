@@ -5,8 +5,8 @@ local wezterm = require('wezterm')
 local M = {}
 
 -- Rate limiting state
-local last_notification = {}  -- pane_id -> timestamp
-local MIN_NOTIFICATION_GAP_MS = 10000  -- Minimum 10 seconds between notifications per pane
+local last_notification = {} -- pane_id -> timestamp
+local MIN_NOTIFICATION_GAP_MS = 10000 -- Minimum 10 seconds between notifications per pane
 
 -- Notification queue for batch processing
 local notification_queue = {}
@@ -18,7 +18,7 @@ local MAX_QUEUE_SIZE = 10
 local function can_notify(pane_id)
     local now = os.time() * 1000
     local last = last_notification[pane_id] or 0
-    
+
     return (now - last) >= MIN_NOTIFICATION_GAP_MS
 end
 
@@ -39,7 +39,7 @@ local function get_notification_title(agent_type)
         codex = 'Codex',
         aider = 'Aider',
     }
-    
+
     return titles[agent_type] or (agent_type:sub(1, 1):upper() .. agent_type:sub(2))
 end
 
@@ -64,7 +64,7 @@ local function send_toast(window, title, message, timeout_ms)
         local success, err = pcall(function()
             window:toast_notification(title, message, nil, timeout_ms)
         end)
-        
+
         if not success then
             wezterm.log_warn('[agent-deck] Failed to send notification: ' .. tostring(err))
         end
@@ -87,10 +87,10 @@ function M.process_queue(window)
     if not window or #notification_queue == 0 then
         return
     end
-    
+
     local now = os.time() * 1000
     local processed = {}
-    
+
     for i, notification in ipairs(notification_queue) do
         -- Skip old notifications (older than 30 seconds)
         if (now - notification.timestamp) < 30000 then
@@ -98,7 +98,7 @@ function M.process_queue(window)
         end
         table.insert(processed, i)
     end
-    
+
     -- Remove processed notifications (in reverse order to maintain indices)
     for i = #processed, 1, -1 do
         table.remove(notification_queue, processed[i])
@@ -113,14 +113,14 @@ function M.notify_waiting(pane, agent_type, config)
     if not config.notifications.enabled or not config.notifications.on_waiting then
         return
     end
-    
+
     local pane_id = pane:pane_id()
-    
+
     -- Check rate limiting
     if not can_notify(pane_id) then
         return
     end
-    
+
     -- Get window for toast
     local window = nil
     local success, err = pcall(function()
@@ -129,19 +129,19 @@ function M.notify_waiting(pane, agent_type, config)
             window = tab:window()
         end
     end)
-    
+
     if not success then
         wezterm.log_warn('[agent-deck] Could not get window for notification: ' .. tostring(err))
     end
-    
+
     -- Build notification
     local title = get_notification_title(agent_type) .. ' - Attention Needed'
     local message = get_notification_message('waiting')
     local timeout = config.notifications.timeout_ms or 4000
-    
+
     -- Send notification
     send_toast(window, title, message, timeout)
-    
+
     -- Record for rate limiting
     record_notification(pane_id)
 end
@@ -157,7 +157,7 @@ function M.notify_status_change(pane, agent_type, old_status, new_status, config
     if new_status ~= 'waiting' then
         return
     end
-    
+
     M.notify_waiting(pane, agent_type, config)
 end
 

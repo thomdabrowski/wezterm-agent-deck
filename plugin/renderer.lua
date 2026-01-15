@@ -18,10 +18,10 @@ end
 ---@return string Default title
 local function get_default_title(tab)
     local pane = tab.active_pane
-    
+
     -- Try to get a meaningful title
     local title = pane.title or ''
-    
+
     if title == '' then
         -- Try process name
         local process_name = pane.foreground_process_name or ''
@@ -30,11 +30,11 @@ local function get_default_title(tab)
             title = process_name:match('[/\\]([^/\\]+)$') or process_name
         end
     end
-    
+
     if title == '' then
         title = 'Terminal'
     end
-    
+
     return title
 end
 
@@ -48,7 +48,7 @@ function M.render_tab_title(agent_state, tab, tab_config, colors)
     local comps = get_components()
     local config_module = require('config')
     local config = config_module.get()
-    
+
     -- Build context for component rendering
     local context = {
         status = agent_state and agent_state.status or 'inactive',
@@ -56,26 +56,26 @@ function M.render_tab_title(agent_state, tab, tab_config, colors)
         tab = tab,
         config = config,
     }
-    
+
     -- Get the default title
     local default_title = get_default_title(tab)
-    
+
     -- If no agent, just return the title
     if not agent_state then
         return {
             { Text = ' ' .. default_title .. ' ' },
         }
     end
-    
+
     -- Render components
     local component_items = comps.render_all(tab_config.components or {}, context)
-    
+
     -- Build result based on position
     local result = {}
-    
+
     -- Add padding
     table.insert(result, { Text = ' ' })
-    
+
     if tab_config.position == 'left' then
         -- Add components first
         for _, item in ipairs(component_items) do
@@ -91,10 +91,10 @@ function M.render_tab_title(agent_state, tab, tab_config, colors)
             table.insert(result, item)
         end
     end
-    
+
     -- Add padding
     table.insert(result, { Text = ' ' })
-    
+
     return result
 end
 
@@ -107,34 +107,34 @@ function M.render_right_status(counts, status_config, colors)
     local comps = get_components()
     local config_module = require('config')
     local config = config_module.get()
-    
+
     -- Check if there are any agents
     local total = 0
     for _, count in pairs(counts) do
         total = total + count
     end
-    
+
     if total == 0 then
         return {}
     end
-    
+
     -- Build context
     local context = {
         counts = counts,
         config = config,
     }
-    
+
     -- Render components
     local result = comps.render_all(status_config.components or {}, context)
-    
+
     -- Filter out empty separators (when adjacent badges are 0)
     local filtered = {}
     local last_was_text = false
-    
+
     for i, item in ipairs(result) do
         local is_separator = false
         local is_empty = false
-        
+
         -- Check if this is a separator (contains ' | ' or similar)
         if item.Text then
             local text = item.Text
@@ -145,7 +145,7 @@ function M.render_right_status(counts, status_config, colors)
             -- Check if previous badge rendered nothing
             is_empty = text == ''
         end
-        
+
         if not is_empty then
             if is_separator and not last_was_text then
                 -- Skip separator if nothing before it
@@ -155,7 +155,7 @@ function M.render_right_status(counts, status_config, colors)
             end
         end
     end
-    
+
     -- Remove trailing separators
     while #filtered > 0 do
         local last = filtered[#filtered]
@@ -165,13 +165,13 @@ function M.render_right_status(counts, status_config, colors)
             break
         end
     end
-    
+
     -- Add padding
     if #filtered > 0 then
         table.insert(filtered, 1, { Text = ' ' })
         table.insert(filtered, { Text = ' ' })
     end
-    
+
     return filtered
 end
 
@@ -183,9 +183,9 @@ end
 function M.simple_status(status, agent_type, config)
     local config_module = require('config')
     config = config or config_module.get()
-    
+
     local icon = config_module.get_status_icon(status, config)
-    
+
     if agent_type then
         return icon .. ' ' .. agent_type
     else
@@ -201,15 +201,15 @@ end
 function M.formatted_status(status, agent_type, config)
     local config_module = require('config')
     config = config or config_module.get()
-    
+
     local icon = config_module.get_status_icon(status, config)
     local color = config_module.get_status_color(status, config)
-    
+
     local text = icon
     if agent_type then
         text = text .. ' ' .. agent_type
     end
-    
+
     return {
         { Foreground = { Color = color } },
         { Text = text },

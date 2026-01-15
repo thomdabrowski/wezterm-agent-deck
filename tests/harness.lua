@@ -43,7 +43,10 @@ end
 
 function M.eq(actual, expected, message)
     if actual ~= expected then
-        error((message or 'not equal') .. ': actual=' .. fmt(actual) .. ' expected=' .. fmt(expected), 2)
+        error(
+            (message or 'not equal') .. ': actual=' .. fmt(actual) .. ' expected=' .. fmt(expected),
+            2
+        )
     end
 end
 

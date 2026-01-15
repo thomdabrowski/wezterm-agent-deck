@@ -7,15 +7,52 @@ local M = {}
 local default_config = {
     -- Polling interval (ms) - default 5 seconds
     update_interval = 5000,
-    
-    -- Agent detection via process name matching
+
+    -- Whitelist of agents to detect (nil = all agents enabled)
+    enabled_agents = nil,
+
+    -- Agent detection via process/title pattern matching
+    -- Pattern types (checked in order of specificity):
+    --   executable_patterns: Match against full executable path or name
+    --   argv_patterns: Match against command line arguments
+    --   title_patterns: Match against pane/terminal title (fallback)
+    --   patterns: Generic fallback for all of the above
     agents = {
         opencode = {
             patterns = { 'opencode' },
-            status_patterns = nil,  -- Use defaults
+            executable_patterns = {
+                'opencode%-darwin',
+                'opencode%-linux',
+                'opencode%-win',
+                '%.opencode/bin/opencode',
+                '/opencode%-ai/',
+                '/opencode$',
+            },
+            argv_patterns = {
+                'bunx%s+opencode',
+                'npx%s+opencode',
+                '/opencode$',
+            },
+            title_patterns = { 'opencode' },
+            status_patterns = nil,
         },
         claude = {
             patterns = { 'claude', 'claude%-code' },
+            executable_patterns = {
+                '@anthropic%-ai/claude%-code',
+                '/claude%-code/',
+                '/claude$',
+                '^claude%s*$',
+            },
+            argv_patterns = {
+                '@anthropic%-ai/claude%-code',
+                'claude%-code',
+                '^claude%s*$',
+            },
+            title_patterns = {
+                'claude code',
+                'claude',
+            },
             status_patterns = nil,
         },
         gemini = {
@@ -31,17 +68,17 @@ local default_config = {
             status_patterns = nil,
         },
     },
-    
+
     -- Tab title format (composable)
     tab_title = {
         enabled = true,
-        position = 'left',  -- 'left' or 'right' of existing title
+        position = 'left', -- 'left' or 'right' of existing title
         components = {
             { type = 'icon' },
             { type = 'separator', text = ' ' },
         },
     },
-    
+
     -- Right status (aggregate view)
     right_status = {
         enabled = true,
@@ -51,7 +88,7 @@ local default_config = {
             { type = 'badge', filter = 'working', label = 'working' },
         },
     },
-    
+
     -- Colors (can be color names or hex)
     colors = {
         working = 'green',
@@ -59,10 +96,10 @@ local default_config = {
         idle = 'blue',
         inactive = 'gray',
     },
-    
+
     -- Icon styles
     icons = {
-        style = 'unicode',  -- 'unicode', 'nerd', or 'emoji'
+        style = 'unicode', -- 'unicode', 'nerd', or 'emoji'
         unicode = {
             working = '●',
             waiting = '◔',
@@ -70,10 +107,10 @@ local default_config = {
             inactive = '◌',
         },
         nerd = {
-            working = '',  -- nf-fa-circle
-            waiting = '',  -- nf-fa-adjust
-            idle = '',  -- nf-fa-circle_o
-            inactive = '',  -- nf-cod-circle_outline
+            working = '', -- nf-fa-circle
+            waiting = '', -- nf-fa-adjust
+            idle = '', -- nf-fa-circle_o
+            inactive = '', -- nf-cod-circle_outline
         },
         emoji = {
             working = '🟢',
@@ -82,13 +119,13 @@ local default_config = {
             inactive = '⚪',
         },
     },
-    
+
     -- Notifications
     notifications = {
         enabled = true,
-        on_waiting = true,  -- Notify when agent needs input
+        on_waiting = true, -- Notify when agent needs input
         timeout_ms = 4000,
-        backend = 'native',  -- 'native' or 'terminal-notifier'
+        backend = 'native', -- 'native' or 'terminal-notifier'
         terminal_notifier = {
             path = nil,
             sound = 'default',
@@ -97,10 +134,10 @@ local default_config = {
             activate = true,
         },
     },
-    
+
     -- Advanced options
-    cooldown_ms = 2000,  -- Anti-flicker delay before transitioning from working to idle
-    max_lines = 100,     -- Max lines to scan for patterns
+    cooldown_ms = 2000, -- Anti-flicker delay before transitioning from working to idle
+    max_lines = 100, -- Max lines to scan for patterns
 }
 
 -- Current configuration (merged with user options)
@@ -112,7 +149,7 @@ local current_config = nil
 ---@return table Merged table
 local function deep_merge(t1, t2)
     local result = {}
-    
+
     -- Copy all from t1
     for k, v in pairs(t1) do
         if type(v) == 'table' and type(t2[k]) == 'table' then
@@ -123,14 +160,14 @@ local function deep_merge(t1, t2)
             result[k] = v
         end
     end
-    
+
     -- Add any keys from t2 not in t1
     for k, v in pairs(t2) do
         if result[k] == nil then
             result[k] = v
         end
     end
-    
+
     return result
 end
 
@@ -141,7 +178,7 @@ local function deep_copy(t)
     if type(t) ~= 'table' then
         return t
     end
-    
+
     local result = {}
     for k, v in pairs(t) do
         result[k] = deep_copy(v)
@@ -156,9 +193,9 @@ function M.set(opts)
         current_config = deep_copy(default_config)
         return
     end
-    
+
     current_config = deep_merge(default_config, opts)
-    
+
     -- Validate configuration
     M.validate(current_config)
 end
@@ -186,32 +223,34 @@ function M.validate(config)
         wezterm.log_warn('[agent-deck] update_interval should be >= 100ms, using default')
         config.update_interval = default_config.update_interval
     end
-    
+
     -- Validate cooldown_ms
     if type(config.cooldown_ms) ~= 'number' or config.cooldown_ms < 0 then
         wezterm.log_warn('[agent-deck] cooldown_ms should be >= 0ms, using default')
         config.cooldown_ms = default_config.cooldown_ms
     end
-    
+
     -- Validate max_lines
     if type(config.max_lines) ~= 'number' or config.max_lines < 10 then
         wezterm.log_warn('[agent-deck] max_lines should be >= 10, using default')
         config.max_lines = default_config.max_lines
     end
-    
+
     -- Validate icon style
     local valid_styles = { unicode = true, nerd = true, emoji = true }
     if not valid_styles[config.icons.style] then
         wezterm.log_warn('[agent-deck] Invalid icon style, using unicode')
         config.icons.style = 'unicode'
     end
-    
+
     -- Validate tab_title position
     if config.tab_title.position ~= 'left' and config.tab_title.position ~= 'right' then
-        wezterm.log_warn('[agent-deck] tab_title.position should be "left" or "right", using "left"')
+        wezterm.log_warn(
+            '[agent-deck] tab_title.position should be "left" or "right", using "left"'
+        )
         config.tab_title.position = 'left'
     end
-    
+
     local valid_backends = { native = true, ['terminal-notifier'] = true }
     if config.notifications.backend and not valid_backends[config.notifications.backend] then
         wezterm.log_warn('[agent-deck] Invalid notification backend, using native')
@@ -236,11 +275,11 @@ function M.get_status_icon(status, config)
     config = config or M.get()
     local style = config.icons.style
     local icons = config.icons[style]
-    
+
     if not icons then
         icons = config.icons.unicode
     end
-    
+
     return icons[status] or icons.inactive
 end
 
