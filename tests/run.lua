@@ -746,6 +746,54 @@ runner:test('status.detect_status ctrl+c to interrupt means working', function()
     t.eq(status.detect_status(pane, 'claude', cfg), 'working')
 end)
 
+runner:test('status.detect_status detects unicode ❯ prompt as idle', function()
+    local status = require('status')
+
+    -- Claude Code uses ❯ (U+276F) not ASCII > for its prompt.
+    -- Without this fix, idle check misses the prompt and stale
+    -- "ctrl+c to interrupt" in scrollback causes false "working".
+    local pane = {
+        get_lines_as_text = function()
+            return table.concat({
+                'some previous output',
+                'ctrl+c to interrupt',
+                '✻ Worked for 2m 15s',
+                '',
+                '❯ ',
+            }, '\n')
+        end,
+        get_logical_lines_as_text = function()
+            return ''
+        end,
+    }
+
+    local cfg = { max_lines = 100, agents = { claude = {} } }
+
+    -- Must detect ❯ as idle, NOT match stale "ctrl+c to interrupt" as working
+    t.eq(status.detect_status(pane, 'claude', cfg), 'idle')
+end)
+
+runner:test('status.detect_status detects bare ❯ prompt as idle', function()
+    local status = require('status')
+
+    local pane = {
+        get_lines_as_text = function()
+            return table.concat({
+                'some output',
+                '',
+                '❯',
+            }, '\n')
+        end,
+        get_logical_lines_as_text = function()
+            return ''
+        end,
+    }
+
+    local cfg = { max_lines = 100, agents = { claude = {} } }
+
+    t.eq(status.detect_status(pane, 'claude', cfg), 'idle')
+end)
+
 runner:test('status.detect_status opencode generating means working', function()
     local status = require('status')
 
